@@ -269,4 +269,60 @@ immutable LDAVarLearn
 	end
 end
 
+immutable LDAVarLearnProblem
+	ntopics::Int
+	nterms::Int
+	corpus::Vector{SDocument}
+end
+
+type LDAVarLearnSolution
+	model::LDAModel
+	gammas::Matrix{Float64}  # each column for a document
+
+	# Note: fields below are only for internal use
+
+	_vinfer_objvs::Vector{Float64}         # objective values of document-specific inference
+	_temp_vinfer_sol::LDAVarInferSolution  # temporary inference solution 
+end
+
+function initialize(prb::LDAVarLearnProblem, model::LDAModel, gammas::Matrix{Float64})
+	K = prb.ntopics
+	V = prb.nterms
+	corpus = prb.corpus
+	ndocs = length(corpus)
+
+	if ntopics(model) != K || nterms(model) != V
+		throw(ArgumentError("The size of model does not match the problem."))
+	end
+
+	if !(size(gammas) != (K, ndocs))
+		throw(ArgumentError("The size of gammas does not match the problem."))
+	end
+
+	maxlen = max_histlength(corpus)
+	tsol = LDAVarInferSolution(K, maxlen)
+	objvs = Array(Float64, ndocs)
+
+	for i = 1:ndocs
+		doc = corpus[i]
+		prb = LDAVarInferProblem(model, doc)
+		initialize!(prb, tsol)
+		objvs[i] = objective(prb, tsol)
+	end
+
+	LDAVarLearnSolution(model, gammas, objvs, tsol)
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
 
