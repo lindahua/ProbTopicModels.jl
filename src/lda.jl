@@ -52,13 +52,13 @@ randdoc(model::LDAModel, len::Int) = randdoc(s, rand(s.tp_distr), len)
 #
 #####################################################################
 
-immutable LDAVarInferOptions
+immutable LDAVarInfer
 	maxiter::Int
 	tol::Float64
 	verbose::Int
 
-	function LDAVarInferOptions(maxiter::Int, tol::Float64, disp::Symbol)
-		new(maxiter, tol, verbosity_level(disp))
+	function LDAVarInfer(;maxiter::Integer=100, tol::Real=1.0e-4, display::Symbol=:none)
+		new(int(maxiter), float64(tol), verbosity_level(display))
 	end
 end
 
@@ -150,13 +150,13 @@ end
 
 function lda_varinfer_update!(model::LDAModel, doc::SDocument, 
 	γ::Vector{Float64}, elogθ::Vector{Float64}, φ::Matrix{Float64}, τ::Vector{Float64}, 
-	options::LDAVarInferOptions)
+	method::LDAVarInfer)
 
 	# Notations:
 	# γ:      variational Dirichlet parameter of topic proportions
 	# elogθ:  expectation of log(θ) w.r.t. Dirichlet(γ)
 	# φ:      per-word soft-assignment of topics, K x n matrix
-	# τ:      topic weights, i.e. sum(φ, 2)
+	# τ:      topic weights, i.e. sum(φ * h, 2)
 
 	terms = doc.terms
 	h = doc.counts
@@ -165,9 +165,9 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 	digam_sum::Float64 = digamma(α0 + doc.sum_counts)
 	tlogp = model.tlogp
 
-	maxiter = options.maxiter
-	tol = options.tol
-	verbose = options.verbose
+	maxiter = method.maxiter
+	tol = method.tol
+	verbose = method.verbose
 	K::Int = ntopics(model)
 	n::Int = length(terms)
 
@@ -253,7 +253,7 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 end
 
 
-function lda_varinfer(model::LDAModel, doc::SDocument, options::LDAVarInferOptions)
+function infer(model::LDAModel, doc::SDocument, method::LDAVarInfer)
 	n = length(doc.terms)
 	K = ntopics(model)
 
@@ -263,11 +263,10 @@ function lda_varinfer(model::LDAModel, doc::SDocument, options::LDAVarInferOptio
 	τ = Array(Float64, K)
 
 	lda_varinfer_init!(model, doc, γ, elogθ, φ, τ)
-	lda_varinfer_update!(model, doc, γ, elogθ, φ, τ, options)
+	lda_varinfer_update!(model, doc, γ, elogθ, φ, τ, method)
 	return LDAVarInferResults(γ, elogθ, φ, τ)
 end
 
-function lda_varinfer(model::LDAModel, doc::SDocument; maxiter::Int=100, tol::Float64=1.0e-4, display=:iter)
-	lda_varinfer(model, doc, LDAVarInferOptions(maxiter, tol, display))
-end
+
+
 

@@ -10,9 +10,12 @@ module ProbTopicModels
 	# types
 	Vocabulary, vocabulary, encode, SDocument, count_words,
 
+	# common names
+	infer, learn,
+
 	# LDA
-	LDAModel, randdoc, LDAVarInferOptions, LDAVarInferResults, mean_theta,
-    da_varinfer_objv, lda_varinfer_init!, lda_varinfer_update!, lda_varinfer
+	LDAModel, randdoc, LDAVarInfer, LDAVarInferResults, mean_theta,
+    lda_varinfer_objv, lda_varinfer_init!, lda_varinfer_update!
 
 
 	include("types.jl")

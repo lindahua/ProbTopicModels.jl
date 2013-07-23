@@ -35,7 +35,7 @@ for i in 1 : ndocs
 	println("  doc     = $(int(doc.counts))")
 	printvec("  theta    = ", theta)
 
-	res = lda_varinfer(lda_model, doc)
+	res = infer(lda_model, doc, LDAVarInfer(display=:iter))
 
 	rtheta = mean_theta(res)
 	printvec("  E(theta) = ", rtheta)
