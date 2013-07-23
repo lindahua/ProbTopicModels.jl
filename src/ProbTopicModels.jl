@@ -19,5 +19,6 @@ module ProbTopicModels
 
 
 	include("types.jl")
+	include("utils.jl")
 	include("lda.jl")
 end

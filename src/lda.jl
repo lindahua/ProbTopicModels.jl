@@ -7,15 +7,13 @@ immutable LDAModel
 	topics::Matrix{Float64}  # V x K
 	tlogp::Matrix{Float64}   # K x V
 
-	function LDAModel(alpha::Vector{Float64}, topics::Matrix{Float64}) 
-		@check_argdims length(alpha) == size(topics, 2)
-		new(Dirichlet(alpha), topics, log(topics'))
+	function LDAModel(dird::Dirichlet, topics::Matrix{Float64})
+		@check_argdims dim(dird) == size(topics,2)
+		new(dird, topics, log(topics'))
 	end
 
-	function LDAModel(alpha::Float64, topics::Matrix{Float64}) 
-		K = size(topics, 2)
-		new(Dirichlet(K, alpha), topics, log(topics'))
-	end
+	LDAModel(alpha::Vector{Float64}, topics::Matrix{Float64}) = LDAModel(Dirichlet(alpha), topics)
+	LDAModel(alpha::Float64, topics::Matrix{Float64}) = LDAModel(Dirichlet(size(topics,2),alpha), topics)
 end
 
 nterms(m::LDAModel) = size(m.topics, 1)
@@ -191,45 +189,13 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 	while !converged && it < maxiter
 		it += 1
 
-		# reset τ
-		fill!(τ, 0.)
+		# update φ: topic assignment
+		soft_topic_assign!(tlogp, elogθ, terms, h, φ, τ)
 
-		# per-word topic assignment (soft) --> φ, a K x n matrix
-
-		o::Int = 0  # base offset for φ, φ[o + k] -- φ[k, i]
-		for i in 1 : n
-			@inbounds w = terms[i]
-
-			# evidences in log-scale
-			mp = -Inf			
-			for k in 1 : K
-				φ[o + k] = v = tlogp[k,w] + elogθ[k]
-				if v > mp
-					mp = v
-				end
-			end
-
-			# softmax (normalize φ)
-			# accumulate to γ at the same time
-
-			s = 0.
-			for k in 1 : K
-				ki = o + k
-				@inbounds s += (φ[ki] = exp(φ[ki] - mp))				
-			end
-
-			inv_s = 1.0 / s
-			for k in 1 : K
-				@inbounds pk = (φ[o + k] *= inv_s)
-				@inbounds γ[k] = α[k] + (τ[k] += pk * h[i])
-			end
-
-			o += K
-		end
-
-		# update elogθ based on new γ
+		# update γ: topic proportion params
 		for k in 1 : K
-			@inbounds elogθ[k] = digamma(γ[k]) - digam_sum
+			@inbounds γ[k] = γk = α[k] + τ[k]
+			@inbounds elogθ[k] = digamma(γk) - digam_sum
 		end
 
 		# decide convergence
@@ -268,5 +234,51 @@ function infer(model::LDAModel, doc::SDocument, method::LDAVarInfer)
 end
 
 
+#####################################################################
+#
+#   Variational EM for LDA learning
+#
+#####################################################################
 
+immutable LDAVarLearn
+	maxiter::Int
+	tol::Float64
+	vinfer_iter::Int
+	vinfer_tol::Float64
+	verbose::Int
+
+	function LDAVarLearn(;
+		maxiter::Integer=200,
+		tol::Float64=1.0e-6, 
+		vinfer_iter::Integer=20,
+		vinfer_tol::Float64=1.0e-8,
+		fixed_topics::Bool=false,
+		fixed_alpha::Bool=false,
+		display::Symbol=:iter)
+
+		new(int(maxiter), float64(tol), 
+			int(vinfer_iter), float64(vinfer_tol), 
+			fixed_topics, fixed_alpha,
+			verbosity_level(display))
+	end
+end
+
+function learn(::Type{LDAModel}, corpus::AbstractVector{SDocument}, method::LDAVarLearn; 
+	dird::Union(Dirichlet,Nothing)=nothing,
+	topics::Union(Matrix{Float64},Nothing)=nothing)
+
+	if dird == nothing 
+		if topics == nothing
+			ldalearn(corpus, method)
+		else
+			ldalearn_with_fixed_topics(corpus, method, topics)
+		end
+	else
+		if topics == nothing
+			ldalearn_with_fixed_dird(corpus, method, dird)
+		else
+			LDAModel(dird, topics)
+		end
+	end
+end
 
