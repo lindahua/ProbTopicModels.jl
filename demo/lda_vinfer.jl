@@ -35,11 +35,12 @@ for i in 1 : ndocs
 	println("  doc     = $(int(doc.counts))")
 	printvec("  theta    = ", theta)
 
-	res = infer(lda_model, doc, LDAVarInfer(display=:iter))
+	res, objv = infer(lda_model, doc, LDAVarInfer(display=:iter))
 
 	rtheta = mean_theta(res)
 	printvec("  E(theta) = ", rtheta)
 	@printf("  difference with truth = %.4f\n", asum(rtheta - theta))
+	@printf("  objective = %.4f\n", objv)
 	println()
 end
 

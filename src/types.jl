@@ -80,6 +80,8 @@ immutable SDocument
 	end
 end
 
+histlength(d::SDocument) = length(d.terms)
+
 function count_words(vsiz::Int, docs::AbstractVector{SDocument})
 	# count total number of words over a corpus
 
@@ -93,3 +95,15 @@ function count_words(vsiz::Int, docs::AbstractVector{SDocument})
 	end
 	r
 end
+
+function max_histlength(docs::AbstractVector{SDocument})
+	maxlen = 0
+	for d in docs
+		l = histlength(d)
+		if l > maxlen
+			maxlen = l
+		end
+	end
+	maxlen
+end
+

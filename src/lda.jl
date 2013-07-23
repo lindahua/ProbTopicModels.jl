@@ -65,118 +65,151 @@ immutable LDAVarInferResults
 	elogtheta::Vector{Float64}
 	phi::Matrix{Float64}
 	tocweights::Vector{Float64}
+
+	function LDAVarInferResults(K::Int, nmax::Int)
+		new(Array(Float64, K), 
+			Array(Float64, K), 
+			Array(Float64, K, nmax), 
+			Array(Float64, K))
+	end
 end
+
+ntopics(r::LDAVarInferResults) = length(r.gamma)
 
 mean_theta(r::LDAVarInferResults) = r.gamma * inv(sum(r.gamma))
 
-function _dirichlet_entropy(a::Vector{Float64}, elog::Vector{Float64})
-	K = length(a)
+function _dirichlet_entropy(α::Vector{Float64}, elogθ::Vector{Float64})
+	K = length(α)
 	s = 0.
 	ent = 0.
 	for k in 1 : K
-		ak = a[k]
-		s += ak
-		ent += (lgamma(ak) - (ak - 1.0) * elog[k])
+		@inbounds αk = α[k]
+		s += αk
+		@inbounds ent += (lgamma(αk) - (αk - 1.0) * elogθ[k])
 	end
 	ent -= lgamma(s)
 end
 
 
-function lda_varinfer_objv(model::LDAModel, doc::SDocument, 
-	vgam::Vector{Float64}, elogtheta::Vector{Float64}, vphi::Matrix{Float64}, tocweights::Vector{Float64})
+function objective(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
+	# compute the objective of LDA variational inference
 
 	K = ntopics(model)
-	alpha::Vector{Float64} = model.dird.alpha
+	α::Vector{Float64} = model.dird.alpha
 	tlogp = model.tlogp
 	terms = doc.terms
 	h = doc.counts
 
-	t_lptheta = 0.
+	γ = r.gamma
+	elogθ = r.elogtheta
+	φ = r.phi
+	τ = r.tocweights
+
+	t_lpθ = 0.
 	for k in 1 : K
-		t_lptheta += (alpha[k] - 1.) * elogtheta[k]
+		t_lpθ += (α[k] - 1.) * elogθ[k]
 	end
 
-	t_lptoc = dot(tocweights, elogtheta)
+	t_lptoc = dot(τ, elogθ)
 
-	gam_ent = _dirichlet_entropy(vgam, elogtheta)
+	γent = _dirichlet_entropy(γ, elogθ)
 
 	t_lpword = 0.
-	t_phi_ent = 0.
+	t_φent = 0.
 
 	for i in 1 : length(terms)
 		w = terms[i]
 		lpw_i = 0.
 		pent_i = 0.
 		for k in 1 : K
-			pv = vphi[k,i]
+			pv = φ[k,i]
 			if pv > 0.
-				lpw_i += pv * tlogp[k,w]
+				@inbounds lpw_i += pv * tlogp[k,w]
 				pent_i -= pv * log(pv)
 			end
 		end
 		t_lpword += h[i] * lpw_i
-		t_phi_ent += h[i] * pent_i
+		t_φent += h[i] * pent_i
 	end
 
-	t_lptheta + t_lptoc + t_lpword + gam_ent + t_phi_ent
+	t_lpθ + t_lptoc + t_lpword + γent + t_φent
 end
 
 
-function lda_varinfer_init!(model::LDAModel, doc::SDocument, 
-	vgam::Vector{Float64}, elogtheta::Vector{Float64}, vphi::Matrix{Float64}, tocweights::Vector{Float64})
+function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
+	# update the result struct based on the gamma field
 
 	K::Int = ntopics(model)
-	n::Int = length(doc.terms)
-	alpha::Vector{Float64} = model.dird.alpha
-	alpha0::Float64 = model.dird.alpha0
+	@assert K == ntopics(r)
 
-	@check_argdims length(vgam) == K
-	@check_argdims size(vphi, 1) == K && size(vphi, 2) == n
+	# get model & doc fields
+	tlogp = model.tlogp
+	terms = doc.terms
+	h = doc.counts
+	
+	# fields of r
+	γ = r.gamma
+	elogθ = r.elogtheta
+	φ = r.phi
+	τ = r.tocweights
 
-	avg_tocweight = doc.sum_counts / K
-	digam_sum = digamma(alpha0 + doc.sum_counts)
+	γ0 = sum(γ)
+	dγ0 = digamma(γ0)
 
-	for k in 1 : K
-		vgam[k] = alpha[k] + avg_tocweight
-		elogtheta[k] = digamma(vgam[k]) - digam_sum
-		tocweights[k] = avg_tocweight
+	for k = 1:K
+		@inbounds elogθ[k] = digamma(γ[k]) - dγ0
 	end
 
-	fill!(vphi, 1.0 / K)
+	soft_topic_assign!(tlogp, elogθ, terms, h, φ, τ)
+	r
+end
+
+function lda_varinfer_init!(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
+	# Inplace initialization of LDA variational inference results
+
+	K::Int = ntopics(model)
+	α::Vector{Float64} = model.dird.alpha
+
+	avg_tocweight = doc.sum_counts / K
+	γ = r.gamma
+	for k = 1:K
+		γ[k] = α[k] + avg_tocweight
+	end
+
+	update_per_gamma!(model, doc, r)
 end
 
 
-function lda_varinfer_update!(model::LDAModel, doc::SDocument, 
-	γ::Vector{Float64}, elogθ::Vector{Float64}, φ::Matrix{Float64}, τ::Vector{Float64}, 
-	method::LDAVarInfer)
+function lda_varinfer_init(model::LDAModel, doc::SDocument)
+	# Create an initialized variational inference result struct
 
-	# Notations:
-	# γ:      variational Dirichlet parameter of topic proportions
-	# elogθ:  expectation of log(θ) w.r.t. Dirichlet(γ)
-	# φ:      per-word soft-assignment of topics, K x n matrix
-	# τ:      topic weights, i.e. sum(φ * h, 2)
+	K = ntopics(model)
+	lda_varinfer_init!(model, doc, LDAVarInferResults(K, histlength(doc)))
+end
 
-	terms = doc.terms
-	h = doc.counts
-	α::Vector{Float64} = model.dird.alpha
-	α0::Float64 = model.dird.alpha0
-	digam_sum::Float64 = digamma(α0 + doc.sum_counts)
-	tlogp = model.tlogp
+
+function lda_varinfer_update!(model::LDAModel, doc::SDocument, r::LDAVarInferResults, method::LDAVarInfer)
+	# core function of LDA variational inference
+
+	# options
 
 	maxiter = method.maxiter
 	tol = method.tol
 	verbose = method.verbose
-	K::Int = ntopics(model)
-	n::Int = length(terms)
 
-	@check_argdims length(γ) == K
-	@check_argdims size(φ, 1) == K && size(φ, 2) >= n
+	# basic variables
+
+	K::Int = ntopics(model)
+	@check_argdims ntopics(r) == K
+	γ::Vector{Float64} = r.gamma
+	τ::Vector{Float64} = r.tocweights
+	α::Vector{Float64} = model.dird.alpha
 
 	# prepare for the updating loop
 
 	converged = false
 	it = 0
-	objv = lda_varinfer_objv(model, doc, γ, elogθ, φ, τ)
+	objv = objective(model, doc, r)
 
 	if verbose >= VERBOSE_PROC
 		@printf("%6s    %12s     %12s\n", "iter", "objective", "obj.change")
@@ -189,19 +222,18 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 	while !converged && it < maxiter
 		it += 1
 
-		# update φ: topic assignment
-		soft_topic_assign!(tlogp, elogθ, terms, h, φ, τ)
-
-		# update γ: topic proportion params
-		for k in 1 : K
-			@inbounds γ[k] = γk = α[k] + τ[k]
-			@inbounds elogθ[k] = digamma(γk) - digam_sum
+		# update γ
+		for k = 1:K
+			@inbounds γ[k] = α[k] + τ[k]
 		end
+
+		# update others
+		update_per_gamma!(model, doc, r)
 
 		# decide convergence
 
 		objv_pre = objv
-		objv = lda_varinfer_objv(model, doc, γ, elogθ, φ, τ)
+		objv = objective(model, doc, r)
 		converged = abs(objv - objv_pre) < tol
 
 		if verbose >= VERBOSE_ITER
@@ -216,6 +248,8 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 			println("Inference terminated after $it iterations without convergence.")
 		end
 	end
+
+	return objv
 end
 
 
@@ -223,14 +257,9 @@ function infer(model::LDAModel, doc::SDocument, method::LDAVarInfer)
 	n = length(doc.terms)
 	K = ntopics(model)
 
-	γ = Array(Float64, K)
-	elogθ = Array(Float64, K)
-	φ = Array(Float64, K, n)
-	τ = Array(Float64, K)
-
-	lda_varinfer_init!(model, doc, γ, elogθ, φ, τ)
-	lda_varinfer_update!(model, doc, γ, elogθ, φ, τ, method)
-	return LDAVarInferResults(γ, elogθ, φ, τ)
+	r::LDAVarInferResults = lda_varinfer_init(model, doc)
+	objv = lda_varinfer_update!(model, doc, r, method)
+	return (r, objv)
 end
 
 
@@ -245,6 +274,8 @@ immutable LDAVarLearn
 	tol::Float64
 	vinfer_iter::Int
 	vinfer_tol::Float64
+	fix_topics::Bool
+	fix_alpha::Bool
 	verbose::Int
 
 	function LDAVarLearn(;
@@ -252,33 +283,15 @@ immutable LDAVarLearn
 		tol::Float64=1.0e-6, 
 		vinfer_iter::Integer=20,
 		vinfer_tol::Float64=1.0e-8,
-		fixed_topics::Bool=false,
-		fixed_alpha::Bool=false,
+		fix_topics::Bool=false,
+		fix_alpha::Bool=false,
 		display::Symbol=:iter)
 
 		new(int(maxiter), float64(tol), 
 			int(vinfer_iter), float64(vinfer_tol), 
-			fixed_topics, fixed_alpha,
+			fix_topics, fix_alpha,
 			verbosity_level(display))
 	end
 end
 
-function learn(::Type{LDAModel}, corpus::AbstractVector{SDocument}, method::LDAVarLearn; 
-	dird::Union(Dirichlet,Nothing)=nothing,
-	topics::Union(Matrix{Float64},Nothing)=nothing)
-
-	if dird == nothing 
-		if topics == nothing
-			ldalearn(corpus, method)
-		else
-			ldalearn_with_fixed_topics(corpus, method, topics)
-		end
-	else
-		if topics == nothing
-			ldalearn_with_fixed_dird(corpus, method, dird)
-		else
-			LDAModel(dird, topics)
-		end
-	end
-end
 
