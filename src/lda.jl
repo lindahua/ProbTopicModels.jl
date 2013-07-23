@@ -165,7 +165,7 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 	n::Int = length(terms)
 
 	@check_argdims length(vgam) == K
-	@check_argdims size(vphi, 1) == K && size(vphi, 2) == n
+	@check_argdims size(vphi, 1) == K && size(vphi, 2) >= n
 
 	# prepare for the updating loop
 
@@ -187,14 +187,16 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 		# reset tocweights
 		fill!(tocweights, 0.)
 
-		# per-word topic assignment (soft)
-		for i in 1 : n
-			w = terms[i]
+		# per-word topic assignment (soft) --> vphi, a K x n matrix
 
-			# compute in log-scale
+		o::Int = 0  # base offset for vphi, vphi[o + k] -- vphi[k, i]
+		for i in 1 : n
+			@inbounds w = terms[i]
+
+			# evidences in log-scale
 			mp = -Inf			
 			for k in 1 : K
-				vphi[k,i] = v = tlogp[k,w] + elogtheta[k]
+				vphi[o + k] = v = tlogp[k,w] + elogtheta[k]
 				if v > mp
 					mp = v
 				end
@@ -205,19 +207,22 @@ function lda_varinfer_update!(model::LDAModel, doc::SDocument,
 
 			s = 0.
 			for k in 1 : K
-				s += (vphi[k,i] = exp(vphi[k,i] - mp))				
+				ki = o + k
+				@inbounds s += (vphi[ki] = exp(vphi[ki] - mp))				
 			end
 
 			inv_s = 1.0 / s
 			for k in 1 : K
-				pk = (vphi[k,i] *= inv_s)
-				vgam[k] = alpha[k] + (tocweights[k] += pk * h[i])
+				@inbounds pk = (vphi[o + k] *= inv_s)
+				@inbounds vgam[k] = alpha[k] + (tocweights[k] += pk * h[i])
 			end
+
+			o += K
 		end
 
 		# update elogtheta based on new vgam
 		for k in 1 : K
-			elogtheta[k] = digamma(vgam[k]) - digam_sum
+			@inbounds elogtheta[k] = digamma(vgam[k]) - digam_sum
 		end
 
 		# decide convergence
