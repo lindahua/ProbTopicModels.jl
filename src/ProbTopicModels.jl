@@ -4,6 +4,7 @@ module ProbTopicModels
 	using MLBase
 
 	import Base.length, Base.show
+	import MLBase.objective, MLBase.update!, MLBase.initialize
 
 	export
 

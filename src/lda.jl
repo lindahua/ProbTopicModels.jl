@@ -53,20 +53,27 @@ randdoc(model::LDAModel, len::Int) = randdoc(s, rand(s.tp_distr), len)
 immutable LDAVarInfer
 	maxiter::Int
 	tol::Float64
-	verbose::Int
+	display::Symbol
 
 	function LDAVarInfer(;maxiter::Integer=100, tol::Real=1.0e-4, display::Symbol=:none)
-		new(int(maxiter), float64(tol), verbosity_level(display))
+		new(int(maxiter), float64(tol), display)
 	end
 end
 
-immutable LDAVarInferResults
+iter_options(m::LDAVarInfer) = IterOptimOptions(maxiter=m.maxiter, tol=m.tol, display=m.display)
+
+immutable LDAVarInferProblem <: IterOptimProblem
+	model::LDAModel
+	doc::SDocument
+end
+
+immutable LDAVarInferSolution <: IterOptimSolution
 	gamma::Vector{Float64}
 	elogtheta::Vector{Float64}
 	phi::Matrix{Float64}
 	tocweights::Vector{Float64}
 
-	function LDAVarInferResults(K::Int, nmax::Int)
+	function LDAVarInferSolution(K::Int, nmax::Int)
 		new(Array(Float64, K), 
 			Array(Float64, K), 
 			Array(Float64, K, nmax), 
@@ -74,9 +81,15 @@ immutable LDAVarInferResults
 	end
 end
 
-ntopics(r::LDAVarInferResults) = length(r.gamma)
+function check_compatible(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
+	K = ntopics(prb.model)
+	n = histlength(prb.doc)
+	if !(length(sol.gamma) == K && size(sol.phi, 2) >= n)
+		throw(ArgumentError("The LDA problem and solution are not compatible."))
+	end
+end
 
-mean_theta(r::LDAVarInferResults) = r.gamma * inv(sum(r.gamma))
+mean_theta(r::LDAVarInferSolution) = r.gamma * inv(sum(r.gamma))
 
 function _dirichlet_entropy(α::Vector{Float64}, elogθ::Vector{Float64})
 	K = length(α)
@@ -91,19 +104,29 @@ function _dirichlet_entropy(α::Vector{Float64}, elogθ::Vector{Float64})
 end
 
 
-function objective(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
+function objective(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 	# compute the objective of LDA variational inference
 
-	K = ntopics(model)
-	α::Vector{Float64} = model.dird.alpha
-	tlogp = model.tlogp
-	terms = doc.terms
-	h = doc.counts
+	# problem fields
+	model::LDAModel = prb.model
+	doc::SDocument = prb.doc
 
-	γ = r.gamma
-	elogθ = r.elogtheta
-	φ = r.phi
-	τ = r.tocweights
+	K::Int = ntopics(model)
+	α::Vector{Float64} = model.dird.alpha
+	tlogp::Matrix{Float64} = model.tlogp
+
+	n::Int = histlength(doc)
+	terms::Vector{Int} = doc.terms
+	h::Vector{Float64} = doc.counts
+
+	# solution fields
+
+	γ = sol.gamma
+	elogθ = sol.elogtheta
+	φ = sol.phi
+	τ = sol.tocweights
+
+	# evaluation of individual terms
 
 	t_lpθ = 0.
 	for k in 1 : K
@@ -132,15 +155,15 @@ function objective(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
 		t_φent += h[i] * pent_i
 	end
 
+	# combine and return
 	t_lpθ + t_lptoc + t_lpword + γent + t_φent
 end
 
 
-function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
+function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferSolution)
 	# update the result struct based on the gamma field
 
 	K::Int = ntopics(model)
-	@assert K == ntopics(r)
 
 	# get model & doc fields
 	tlogp = model.tlogp
@@ -164,13 +187,39 @@ function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferResult
 	r
 end
 
-function lda_varinfer_init!(model::LDAModel, doc::SDocument, r::LDAVarInferResults)
+function update!(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
+	# Update of one iteration
+
+	check_compatible(prb, sol)
+
+	model::LDAModel = prb.model
+	doc::SDocument = prb.doc
+	K::Int = ntopics(model)
+
+	# update γ
+	α::Vector{Float64} = model.dird.alpha
+	γ::Vector{Float64} = sol.gamma
+	τ::Vector{Float64} = sol.tocweights
+
+	for k = 1:K
+		γ[k] = α[k] + τ[k]
+	end
+
+	# update other fields
+	update_per_gamma!(model, doc, sol)
+end
+
+function initialize!(prb::LDAVarInferProblem, r::LDAVarInferSolution)
 	# Inplace initialization of LDA variational inference results
 
+	check_compatible(prb, r)
+
+	model::LDAModel = prb.model
+	doc::SDocument = prb.doc
 	K::Int = ntopics(model)
 	α::Vector{Float64} = model.dird.alpha
 
-	avg_tocweight = doc.sum_counts / K
+	avg_tocweight::Float64 = doc.sum_counts / K
 	γ = r.gamma
 	for k = 1:K
 		γ[k] = α[k] + avg_tocweight
@@ -180,87 +229,13 @@ function lda_varinfer_init!(model::LDAModel, doc::SDocument, r::LDAVarInferResul
 end
 
 
-function lda_varinfer_init(model::LDAModel, doc::SDocument)
+function initialize(prb::LDAVarInferProblem)
 	# Create an initialized variational inference result struct
 
-	K = ntopics(model)
-	lda_varinfer_init!(model, doc, LDAVarInferResults(K, histlength(doc)))
+	initialize!(prb, LDAVarInferSolution(ntopics(prb.model), histlength(prb.doc)))
 end
 
-
-function lda_varinfer_update!(model::LDAModel, doc::SDocument, r::LDAVarInferResults, method::LDAVarInfer)
-	# core function of LDA variational inference
-
-	# options
-
-	maxiter = method.maxiter
-	tol = method.tol
-	verbose = method.verbose
-
-	# basic variables
-
-	K::Int = ntopics(model)
-	@check_argdims ntopics(r) == K
-	γ::Vector{Float64} = r.gamma
-	τ::Vector{Float64} = r.tocweights
-	α::Vector{Float64} = model.dird.alpha
-
-	# prepare for the updating loop
-
-	converged = false
-	it = 0
-	objv = objective(model, doc, r)
-
-	if verbose >= VERBOSE_PROC
-		@printf("%6s    %12s     %12s\n", "iter", "objective", "obj.change")
-		println("------------------------------------------")
-		@printf("%6d    %12.4e\n", 0, objv)
-	end
-
-	# updating loop
-
-	while !converged && it < maxiter
-		it += 1
-
-		# update γ
-		for k = 1:K
-			@inbounds γ[k] = α[k] + τ[k]
-		end
-
-		# update others
-		update_per_gamma!(model, doc, r)
-
-		# decide convergence
-
-		objv_pre = objv
-		objv = objective(model, doc, r)
-		converged = abs(objv - objv_pre) < tol
-
-		if verbose >= VERBOSE_ITER
-			@printf("%6d    %12.4e     %12.4e\n", it, objv, objv - objv_pre)
-		end
-	end
-
-	if verbose >= VERBOSE_PROC
-		if converged
-			println("Inference converged with $it iterations.")
-		else
-			println("Inference terminated after $it iterations without convergence.")
-		end
-	end
-
-	return objv
-end
-
-
-function infer(model::LDAModel, doc::SDocument, method::LDAVarInfer)
-	n = length(doc.terms)
-	K = ntopics(model)
-
-	r::LDAVarInferResults = lda_varinfer_init(model, doc)
-	objv = lda_varinfer_update!(model, doc, r, method)
-	return (r, objv)
-end
+infer(model::LDAModel, doc::SDocument, method::LDAVarInfer) = solve(LDAVarInferProblem(model, doc), iter_options(method))
 
 
 #####################################################################
