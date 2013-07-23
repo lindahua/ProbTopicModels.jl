@@ -11,7 +11,7 @@ module ProbTopicModels
 	Vocabulary, vocabulary, encode, SDocument, count_words,
 
 	# LDA
-	LDAModel, randdoc, LDAVarInferOptions, LDAVarInferResults, 
+	LDAModel, randdoc, LDAVarInferOptions, LDAVarInferResults, mean_theta,
     da_varinfer_objv, lda_varinfer_init!, lda_varinfer_update!, lda_varinfer
 
 

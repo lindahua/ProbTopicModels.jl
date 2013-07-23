@@ -37,8 +37,7 @@ for i in 1 : ndocs
 
 	res = lda_varinfer(lda_model, doc)
 
-	#printvec("  vgam     = ", res.vgam)
-	rtheta = res.vgam / sum(res.vgam)
+	rtheta = mean_theta(res)
 	printvec("  E(theta) = ", rtheta)
 	@printf("  difference with truth = %.4f\n", asum(rtheta - theta))
 	println()
