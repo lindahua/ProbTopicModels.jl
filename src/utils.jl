@@ -51,3 +51,24 @@ function soft_topic_assign!(
 		o += K
 	end	
 end
+
+
+function add_word_counts!(
+	W::Matrix{Float64},       # accumulator, size (K, V) 
+	terms::Vector{Int},       # list of terms, size (n,)
+	cnts::Vector{Float64},    # counts of terms, size (n,)
+	φ::Matrix{Float64})       # soft assignment table, size (K, n+)
+
+	K = size(W, 1)
+	n = length(terms)
+
+	for i = 1:n
+		w = terms[i]
+		c = cnts[i]
+
+		for k = 1:K
+			W[k,w] += c * φ[k,i]
+		end
+	end
+end
+

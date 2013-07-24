@@ -281,9 +281,32 @@ type LDAVarLearnSolution
 
 	# Note: fields below are only for internal use
 
-	_vinfer_objvs::Vector{Float64}         # objective values of document-specific inference
+	_tw::Float64             		# total sample weights
+	_vinfer_objv::Float64    		# sum of variational inference objective
+	_sum_elogθ::Vector{Float64}     # sum of E[log(θ)] from all documents
+	_wcounts::Matrix{Float64}       # total per-topic word counts
+
 	_temp_vinfer_sol::LDAVarInferSolution  # temporary inference solution 
+
+	function LDAVarLearnSolution(model::LDAModel, gammas::Matrix{Float64}, maxhistlen::Int)
+		K = ntopics(model)
+		V = nterms(model)
+		if size(gammas, 1) != K
+			throw(ArgumentError("The size of gammas does not match the model."))
+		end
+
+		K = ntopics(model)
+		tw = 0.
+		vinf_objv = NaN
+		sum_elogθ = Array(Float64, K)
+		wcounts = Array(Float64, K, V)
+		vinf_sol = LDAVarInferSolution(K, maxhistlen)
+
+		new(model, gammas, tw, vinf_objv, sum_elogθ, wcounts, vinf_sol)
+	end
 end
+
+objective(prb::LDAVarLearnProblem, sol::LDAVarLearnSolution) = sol._vinfer_objv
 
 function initialize(prb::LDAVarLearnProblem, model::LDAModel, gammas::Matrix{Float64})
 	K = prb.ntopics
@@ -299,30 +322,102 @@ function initialize(prb::LDAVarLearnProblem, model::LDAModel, gammas::Matrix{Flo
 		throw(ArgumentError("The size of gammas does not match the problem."))
 	end
 
-	maxlen = max_histlength(corpus)
-	tsol = LDAVarInferSolution(K, maxlen)
-	objvs = Array(Float64, ndocs)
-
-	for i = 1:ndocs
-		doc = corpus[i]
-		prb = LDAVarInferProblem(model, doc)
-		initialize!(prb, tsol)
-		objvs[i] = objective(prb, tsol)
-	end
-
-	LDAVarLearnSolution(model, gammas, objvs, tsol)
+	LDAVarLearnSolution(model, gammas, max_histlength(corpus))
 end
 
+function initialize(prb::LDAVarLearnProblem, model::LDAModel)
+	K = size(model, 1)
+	corpus = prb.corpus
+	ndocs = length(corpus)
 
+	# initialize gammas
+	α::Vector{Float64} = prb.model.dird.alpha
+	gammas = Array(Float64, K, ndocs)
+	for i = 1:ndocs
+		doc::SDocument = corpus[i]
+		avg_tocweight::Float64 = doc.sum_counts / K
+		for k = 1:K
+			@inbounds gammas[k,i] = α[k] + avg_tocweight
+		end
+	end
 
+	initialize(prb, model, gammas)
+end
 
+function perform_inference!(sol::LDAVarLearnSolution, corpus::AbstractVector{SDocument}, opts::IterOptimOptions)
+	model::LDAModel = sol.model
+	K::Int = ntopics(model)
+	n::Int = length(corpus)
+	gammas = sol.gammas
+	@assert size(gammas) == (K, n)
+ 
+	# reset 
+	tw = 0.
+	objv = 0.
+	slogθ = sol._sum_elogθ
+	fill!(slogθ, 0.)
+	W = sol._wcounts
+	fill!(W, 0.)
 
+	inf_sol = sol._temp_vinfer_sol
+	γ::Vector{Float64} = inf_sol.gamma
 
+	# perform per-document inference
+	for i = 1:n
+		doc::SDocument = corpus[i]
 
+		# copy the temporary gamma
+		for k = 1:K
+			@inbounds γ[k] = gammas[k,i]
+		end
 
+		# initialize inference
+		update_per_gamma!(model, doc, inf_sol)
 
+		# inference updating loops
+		r = iter_optim!(LDAVarInferProblem(model, doc), inf_sol, opts)
 
+		# collect relevant statistics
+		tw += 1.0
+		objv += r.objective
+		add!(slogθ, inf_sol.elogtheta)
+		add_word_counts!(W, doc.terms, doc.counts, inf_sol.phi)
+	end
 
+	sol._tw = tw
+	sol._vinfer_objv = objv
+end
 
+function update_model!(sol::LDAVarLearnSolution, fix_dird::Bool, fix_topics::Bool)
+	model::LDAModel = sol.model
+	dird::Dirichlet = model.dird
+	topics::Matrix{Float64} = model.topics
+
+	# Update Dirichlet distribution
+	if !fix_dird
+		elogθ = multiply!(sol._sum_elogθ, inv(sol._tw))
+		dird = Distributions.fit_mle!(Dirichlet, elogθ, dird.alpha)
+	end
+
+	# Update topics
+	if !fix_topics
+		topics = transpose(sol._wcounts)
+		V = size(topics, 1)
+		K = size(topics, 2)
+
+		for k = 1:K
+			s = 0.
+			for i=1:V
+				s += topics[i,k]
+			end
+			inv_s = inv(s)
+			for i=1:V
+				topics[i,k] *= inv_s
+			end
+		end
+	end
+
+	sol.model = LDAModel(dird, topics)
+end
 
 
