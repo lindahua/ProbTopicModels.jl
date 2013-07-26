@@ -50,6 +50,8 @@ randdoc(model::LDAModel, len::Int) = randdoc(s, rand(s.tp_distr), len)
 #
 #####################################################################
 
+# variational inference method
+
 immutable LDAVarInfer
 	maxiter::Int
 	tol::Float64
@@ -60,14 +62,14 @@ immutable LDAVarInfer
 	end
 end
 
-iter_options(m::LDAVarInfer) = IterOptimOptions(maxiter=m.maxiter, tol=m.tol, display=m.display)
+# problem & solution types
 
 immutable LDAVarInferProblem <: IterOptimProblem
 	model::LDAModel
 	doc::SDocument
 end
 
-immutable LDAVarInferSolution <: IterOptimSolution
+immutable LDAVarInferSolution
 	gamma::Vector{Float64}
 	elogtheta::Vector{Float64}
 	phi::Matrix{Float64}
@@ -90,6 +92,9 @@ function check_compatible(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 end
 
 mean_theta(r::LDAVarInferSolution) = r.gamma * inv(sum(r.gamma))
+
+
+# evaluation of objective
 
 function _dirichlet_entropy(α::Vector{Float64}, elogθ::Vector{Float64})
 	K = length(α)
@@ -151,14 +156,20 @@ function objective(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 				pent_i -= pv * log(pv)
 			end
 		end
-		t_lpword += h[i] * lpw_i
-		t_φent += h[i] * pent_i
+
+		h_i = h[i]
+		t_lpword += h_i * lpw_i
+		t_φent += h_i * pent_i
 	end
 
 	# combine and return
 	t_lpθ + t_lptoc + t_lpword + γent + t_φent
 end
 
+
+# initialize or update solution
+
+# update solution
 
 function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferSolution)
 	# update the result struct based on the gamma field
@@ -187,6 +198,25 @@ function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferSoluti
 	r
 end
 
+function initialize!(prb::LDAVarInferProblem, r::LDAVarInferSolution)
+	# Inplace initialization of LDA variational inference results
+
+	check_compatible(prb, r)
+
+	model::LDAModel = prb.model
+	doc::SDocument = prb.doc
+	K::Int = ntopics(model)
+	α::Vector{Float64} = model.dird.alpha
+
+	avg_tocweight::Float64 = doc.sum_counts / K
+	γ = r.gamma
+	for k = 1:K
+		γ[k] = α[k] + avg_tocweight
+	end
+
+	update_per_gamma!(model, doc, r)
+end
+
 function update!(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 	# Update of one iteration
 
@@ -209,33 +239,15 @@ function update!(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 	update_per_gamma!(model, doc, sol)
 end
 
-function initialize!(prb::LDAVarInferProblem, r::LDAVarInferSolution)
-	# Inplace initialization of LDA variational inference results
-
-	check_compatible(prb, r)
-
-	model::LDAModel = prb.model
-	doc::SDocument = prb.doc
-	K::Int = ntopics(model)
-	α::Vector{Float64} = model.dird.alpha
-
-	avg_tocweight::Float64 = doc.sum_counts / K
-	γ = r.gamma
-	for k = 1:K
-		γ[k] = α[k] + avg_tocweight
-	end
-
-	update_per_gamma!(model, doc, r)
-end
-
-
 function initialize(prb::LDAVarInferProblem)
 	# Create an initialized variational inference result struct
 
 	initialize!(prb, LDAVarInferSolution(ntopics(prb.model), histlength(prb.doc)))
 end
 
-infer(model::LDAModel, doc::SDocument, method::LDAVarInfer) = solve(LDAVarInferProblem(model, doc), iter_options(method))
+function infer(model::LDAModel, doc::SDocument, method::LDAVarInfer)
+	solve(LDAVarInferProblem(model, doc), method.maxiter, method.tol, method.display)
+end
 
 
 #####################################################################
@@ -344,7 +356,7 @@ function initialize(prb::LDAVarLearnProblem, model::LDAModel)
 	initialize(prb, model, gammas)
 end
 
-function perform_inference!(sol::LDAVarLearnSolution, corpus::AbstractVector{SDocument}, opts::IterOptimOptions)
+function perform_inference!(sol::LDAVarLearnSolution, corpus::AbstractVector{SDocument}, opts)
 	model::LDAModel = sol.model
 	K::Int = ntopics(model)
 	n::Int = length(corpus)
