@@ -261,8 +261,8 @@ immutable LDAVarLearn
 	tol::Float64
 	vinfer_iter::Int
 	vinfer_tol::Float64
-	fix_topics::Bool
 	fix_alpha::Bool
+	fix_topics::Bool
 	verbose::Int
 
 	function LDAVarLearn(;
@@ -276,160 +276,142 @@ immutable LDAVarLearn
 
 		new(int(maxiter), float64(tol), 
 			int(vinfer_iter), float64(vinfer_tol), 
-			fix_topics, fix_alpha,
+			fix_alpha, fix_topics, 
 			verbosity_level(display))
 	end
 end
 
-immutable LDAVarLearnProblem
+# problem and state types
+
+immutable LDAVarLearnProblem{Corpus<:AbstractVector{SDocument}}
 	ntopics::Int
 	nterms::Int
-	corpus::Vector{SDocument}
+	corpus::Corpus
 end
 
-type LDAVarLearnSolution
-	model::LDAModel
-	gammas::Matrix{Float64}  # each column for a document
+type LDAVarLearnState
+	tw::Float64                # total sample weight
+	model::LDAModel            # LDA model
+	gammas::Matrix{Float64}    # a matrix of all gamma vectors
 
-	# Note: fields below are only for internal use
+	tsol::LDAVarInferSolution    # temporary solution for current document
+	vinf_objv::Float64           # accumulated objective of variational inference
+	slogθ::Vector{Float64}       # accumulated E[logθ] of variational inference
+	W::Marrix{Float64}           # accumulated per-topic word counts
 
-	_tw::Float64             		# total sample weights
-	_vinfer_objv::Float64    		# sum of variational inference objective
-	_sum_elogθ::Vector{Float64}     # sum of E[log(θ)] from all documents
-	_wcounts::Matrix{Float64}       # total per-topic word counts
-
-	_temp_vinfer_sol::LDAVarInferSolution  # temporary inference solution 
-
-	function LDAVarLearnSolution(model::LDAModel, gammas::Matrix{Float64}, maxhistlen::Int)
-		K = ntopics(model)
-		V = nterms(model)
-		if size(gammas, 1) != K
-			throw(ArgumentError("The size of gammas does not match the model."))
-		end
-
-		K = ntopics(model)
-		tw = 0.
-		vinf_objv = NaN
-		sum_elogθ = Array(Float64, K)
-		wcounts = Array(Float64, K, V)
-		vinf_sol = LDAVarInferSolution(K, maxhistlen)
-
-		new(model, gammas, tw, vinf_objv, sum_elogθ, wcounts, vinf_sol)
-	end
+	vinf_method::LDAVarInfer     # variational inference options
+	fix_alpha::Bool
+	fix_topics::Bool 
 end
 
-objective(prb::LDAVarLearnProblem, sol::LDAVarLearnSolution) = sol._vinfer_objv
+objective(st::LDAVarLearnState) = st.vinf_objv
 
-function initialize(prb::LDAVarLearnProblem, model::LDAModel, gammas::Matrix{Float64})
-	K = prb.ntopics
-	V = prb.nterms
+# initialize
+
+function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAModel, gammas::Matrix{})
 	corpus = prb.corpus
 	ndocs = length(corpus)
+	K = ntopics(model)
+	V = nterms(model)
+	size(gammas) == (K, ndocs) || throw(ArgumentError("The size of gammas is incorrect."))
 
-	if ntopics(model) != K || nterms(model) != V
-		throw(ArgumentError("The size of model does not match the problem."))
-	end
+	# prepare the temporary solution structure
+	max_hlen = max_histlength(corpus)
+	tsol = LDAVarInferSolution(K, max_hlen)
 
-	if !(size(gammas) != (K, ndocs))
-		throw(ArgumentError("The size of gammas does not match the problem."))
-	end
+	# prepare other data structures
+	slogθ = Array(Float64, K)
+	W = Array(Float64, K, V)
 
-	LDAVarLearnSolution(model, gammas, max_histlength(corpus))
+	# method
+	vinf_method = LDAVarInfer(maxiter=method.vinfer_iter, tol=method.vinfer_tol, display=:none)
+
+	LDAVarLearnState(float64(ndocs), model, gammas, tsol, NaN, slogθ, W, 
+		vinf_method, method.fix_alpha, method.fix_topics)
 end
 
-function initialize(prb::LDAVarLearnProblem, model::LDAModel)
-	K = size(model, 1)
+function initialize{Corpus}(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAModel)
+	# initialize gamma
 	corpus = prb.corpus
-	ndocs = length(corpus)
+	K::Int = ntopics(prb.model)
+	ndocs::Int = length(corpus)
+	α::Vector{Float64} = prb.model.
 
-	# initialize gammas
-	α::Vector{Float64} = prb.model.dird.alpha
 	gammas = Array(Float64, K, ndocs)
 	for i = 1:ndocs
 		doc::SDocument = corpus[i]
 		avg_tocweight::Float64 = doc.sum_counts / K
 		for k = 1:K
-			@inbounds gammas[k,i] = α[k] + avg_tocweight
+			gammas[k] = α[k] + avg_tocweight
 		end
 	end
 
-	initialize(prb, model, gammas)
+	# construct the entire state
+	initialize(prb, method, model, gammas)
 end
 
-function perform_inference!(sol::LDAVarLearnSolution, corpus::AbstractVector{SDocument}, opts)
-	model::LDAModel = sol.model
+
+# Update
+
+function update!{Corpus}(prb::LDAVarLearnProblem{Corpus}, st::LDAVarLearnState)
+	if !st.fix_alpha
+		update_alpha!(st)
+	end
+
+	if !st.fix_topics
+		update_topics!(st)
+	end
+
+	perform_varinfer!(prb.model, prb.corpus, st)
+end
+
+function perform_varinfer!(model::LDAModel, corpus::AbstractVector{SDocument}, st::LDAVarLearnState)
 	K::Int = ntopics(model)
-	n::Int = length(corpus)
-	gammas = sol.gammas
-	@assert size(gammas) == (K, n)
- 
-	# reset 
-	tw = 0.
+
+	# reset accumulators
 	objv = 0.
-	slogθ = sol._sum_elogθ
+	slogθ = st.slogθ
 	fill!(slogθ, 0.)
-	W = sol._wcounts
+	W = st.W
 	fill!(W, 0.)
 
-	inf_sol = sol._temp_vinfer_sol
-	γ::Vector{Float64} = inf_sol.gamma
+	# prepare temporary solution
+	model = st.model
+	gammas::Matrix{Float64} = st.gammas
+	tsol::LDAVarInferSolution = st.tsol
+	γ::Vector{Float64} = tsol.gamma
+	vinf_method = st.vinf_method
 
-	# perform per-document inference
-	for i = 1:n
+	for i = 1:length(corpus)
 		doc::SDocument = corpus[i]
 
-		# copy the temporary gamma
+		# resume the temporary state
 		for k = 1:K
 			@inbounds γ[k] = gammas[k,i]
 		end
+		update_per_gamma!(model, doc, tsol)
 
-		# initialize inference
-		update_per_gamma!(model, doc, inf_sol)
-
-		# inference updating loops
-		r = iter_optim!(LDAVarInferProblem(model, doc), inf_sol, opts)
+		# perform inference
+		iter_optim!(LDAVarInferProblem(model, doc), vinf_method.maxiter, vinf_method.tol)
 
 		# collect relevant statistics
-		tw += 1.0
-		objv += r.objective
-		add!(slogθ, inf_sol.elogtheta)
-		add_word_counts!(W, doc.terms, doc.counts, inf_sol.phi)
+		add!(slogθ, tsol.elogtheta)
+		add_word_counts!(W, doc.terms, doc.counts, tsol.phi)
+		objv += objective(tsol)
 	end
-
-	sol._tw = tw
-	sol._vinfer_objv = objv
+	st.vinf_objv = objv
 end
 
-function update_model!(sol::LDAVarLearnSolution, fix_dird::Bool, fix_topics::Bool)
-	model::LDAModel = sol.model
-	dird::Dirichlet = model.dird
-	topics::Matrix{Float64} = model.topics
-
-	# Update Dirichlet distribution
-	if !fix_dird
-		elogθ = multiply!(sol._sum_elogθ, inv(sol._tw))
-		dird = Distributions.fit_mle!(Dirichlet, elogθ, dird.alpha)
-	end
-
-	# Update topics
-	if !fix_topics
-		topics = transpose(sol._wcounts)
-		V = size(topics, 1)
-		K = size(topics, 2)
-
-		for k = 1:K
-			s = 0.
-			for i=1:V
-				s += topics[i,k]
-			end
-			inv_s = inv(s)
-			for i=1:V
-				topics[i,k] *= inv_s
-			end
-		end
-	end
-
-	sol.model = LDAModel(dird, topics)
+function update_alpha!(st::LDAVarLearnState)
+	slogθ = multiply!(st.slogθ, inv(s.tw))
+	Distributions.fit_mle!(Dirichlet, slogθ, st.model.dird.alpha)
 end
+
+function update_topics!(st::LDAVarLearnState)
+	
+end
+
+
+
 
 
