@@ -269,7 +269,7 @@ immutable LDAVarLearn
 	vinfer_tol::Float64
 	fix_alpha::Bool
 	fix_topics::Bool
-	verbose::Int
+	display::Symbol
 
 	function LDAVarLearn(;
 		maxiter::Integer=200,
@@ -282,8 +282,7 @@ immutable LDAVarLearn
 
 		new(int(maxiter), float64(tol), 
 			int(vinfer_iter), float64(vinfer_tol), 
-			fix_alpha, fix_topics, 
-			verbosity_level(display))
+			fix_alpha, fix_topics, display)
 	end
 end
 
@@ -297,7 +296,8 @@ end
 
 type LDAVarLearnState
 	tw::Float64                # total sample weight
-	model::LDAModel            # LDA model
+	alpha::Vector{Float64}     # Dirichlet cofficients of the model
+	tlogp::Matrix{Float64}     # log of word-probablities (K x V)
 	gammas::Matrix{Float64}    # a matrix of all gamma vectors
 
 	tsol::LDAVarInferSolution    # temporary solution for current document
@@ -310,11 +310,26 @@ type LDAVarLearnState
 	fix_topics::Bool 
 end
 
+ntopics(st::LDAVarLearnState) = length(st.alpha)
+
 objective(st::LDAVarLearnState) = st.vinf_objv
+
+immutable LDAVarLearnResults
+	model::LDAModel
+	gammas::Matrix{Float64}
+end
+
+function get_results(st::LDAVarLearnState)
+	topics = normalize!(exp!(st.tlogp'), 1, 1)
+	model = LDAModel(st.alpha, topics)
+	LDAVarLearnResults(model, st.gammas)	
+end
+
 
 # initialize
 
-function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAModel, gammas::Matrix{})
+function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAModel, gammas::Matrix{Float64})
+
 	corpus = prb.corpus
 	ndocs = length(corpus)
 	K = ntopics(model)
@@ -332,7 +347,11 @@ function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAMode
 	# method
 	vinf_method = LDAVarInfer(maxiter=method.vinfer_iter, tol=method.vinfer_tol, display=:none)
 
-	LDAVarLearnState(float64(ndocs), model, gammas, tsol, NaN, slogθ, W, 
+	# initial model
+	alpha = model.dird.alpha
+	tlogp = model.tlogp
+
+	LDAVarLearnState(float64(ndocs), alpha, tlogp, gammas, tsol, NaN, slogθ, W, 
 		vinf_method, method.fix_alpha, method.fix_topics)
 end
 
@@ -341,7 +360,7 @@ function initialize{Corpus}(prb::LDAVarLearnProblem, method::LDAVarLearn, model:
 	corpus = prb.corpus
 	K::Int = ntopics(prb.model)
 	ndocs::Int = length(corpus)
-	α::Vector{Float64} = prb.model.
+	α::Vector{Float64} = prb.alpha
 
 	gammas = Array(Float64, K, ndocs)
 	for i = 1:ndocs
@@ -371,8 +390,8 @@ function update!{Corpus}(prb::LDAVarLearnProblem{Corpus}, st::LDAVarLearnState)
 	perform_varinfer!(prb.model, prb.corpus, st)
 end
 
-function perform_varinfer!(model::LDAModel, corpus::AbstractVector{SDocument}, st::LDAVarLearnState)
-	K::Int = ntopics(model)
+function perform_varinfer!(st::LDAVarLearnState, corpus::AbstractVector{SDocument})
+	K::Int = ntopics(st)
 
 	# reset accumulators
 	objv = 0.
@@ -382,7 +401,8 @@ function perform_varinfer!(model::LDAModel, corpus::AbstractVector{SDocument}, s
 	fill!(W, 0.)
 
 	# prepare temporary solution
-	model = st.model
+	alpha::Vector{Float64} = st.alpha
+	tlogp::Matrix{Float64} = st.tlogp
 	gammas::Matrix{Float64} = st.gammas
 	tsol::LDAVarInferSolution = st.tsol
 	γ::Vector{Float64} = tsol.gamma
@@ -395,10 +415,10 @@ function perform_varinfer!(model::LDAModel, corpus::AbstractVector{SDocument}, s
 		for k = 1:K
 			@inbounds γ[k] = gammas[k,i]
 		end
-		update_per_gamma!(model, doc, tsol)
+		update_per_gamma!(tlogp, doc, tsol)
 
 		# perform inference
-		iter_optim!(LDAVarInferProblem(model, doc), vinf_method.maxiter, vinf_method.tol)
+		iter_optim!(LDAVarInferProblem(alpha, tlogp, doc), vinf_method.maxiter, vinf_method.tol)
 
 		# collect relevant statistics
 		add!(slogθ, tsol.elogtheta)
@@ -410,14 +430,21 @@ end
 
 function update_alpha!(st::LDAVarLearnState)
 	slogθ = multiply!(st.slogθ, inv(s.tw))
-	Distributions.fit_mle!(Dirichlet, slogθ, st.model.dird.alpha)
+	Distributions.fit_mle!(Dirichlet, slogθ, st.alpha)
 end
 
 function update_topics!(st::LDAVarLearnState)
-	
+	tlogp = st.tlogp
+	log!(normalize!(tlogp, W, 1, 2))
 end
 
+function learn{Corpus}(prb::LDAVarLearnProblem{Corpus}, init_model::LDAModel, method::LDAVarLearn)
+	if ntopics(prb) != ntopics(init_model)
+		throw(ArgumentError("The number of topics does not match."))
+	end
 
-
-
+	st = initialize(prb, init_model)
+	info = iter_optim!(prb, st, method.maxiter, method.tol, method.display)
+	return (get_results(st), info)
+end
 
