@@ -296,7 +296,7 @@ end
 
 # problem and state types
 
-immutable LDAVarLearnProblem{Corpus<:AbstractVector{SDocument}}
+immutable LDAVarLearnProblem{Corpus<:AbstractVector{SDocument}} <: IterOptimProblem
 	ntopics::Int
 	nterms::Int
 	corpus::Corpus
@@ -320,7 +320,7 @@ end
 
 ntopics(st::LDAVarLearnState) = length(st.alpha)
 
-objective(st::LDAVarLearnState) = st.vinf_objv
+objective(prb::LDAVarLearnProblem, st::LDAVarLearnState) = st.vinf_objv
 
 immutable LDAVarLearnResults
 	model::LDAModel
@@ -363,19 +363,23 @@ function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAMode
 		vinf_method, method.fix_alpha, method.fix_topics)
 end
 
-function initialize{Corpus}(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAModel)
+function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAModel)
 	# initialize gamma
 	corpus = prb.corpus
-	K::Int = ntopics(prb.model)
+	K::Int = prb.ntopics
+	if ntopics(model) != K
+		throw(ArgumentError("The numbers of topics do not match."))
+	end
+
 	ndocs::Int = length(corpus)
-	α::Vector{Float64} = prb.alpha
+	α::Vector{Float64} = model.dird.alpha
 
 	gammas = Array(Float64, K, ndocs)
 	for i = 1:ndocs
 		doc::SDocument = corpus[i]
 		avg_tocweight::Float64 = doc.sum_counts / K
 		for k = 1:K
-			gammas[k] = α[k] + avg_tocweight
+			gammas[k,i] = α[k] + avg_tocweight
 		end
 	end
 
@@ -387,6 +391,8 @@ end
 # Update
 
 function update!{Corpus}(prb::LDAVarLearnProblem{Corpus}, st::LDAVarLearnState)
+	perform_varinfer!(st, prb.corpus)
+
 	if !st.fix_alpha
 		update_alpha!(st)
 	end
@@ -394,8 +400,6 @@ function update!{Corpus}(prb::LDAVarLearnProblem{Corpus}, st::LDAVarLearnState)
 	if !st.fix_topics
 		update_topics!(st)
 	end
-
-	perform_varinfer!(prb.model, prb.corpus, st)
 end
 
 function perform_varinfer!(st::LDAVarLearnState, corpus::AbstractVector{SDocument})
@@ -426,32 +430,32 @@ function perform_varinfer!(st::LDAVarLearnState, corpus::AbstractVector{SDocumen
 		update_per_gamma!(tlogp, doc, tsol)
 
 		# perform inference
-		iter_optim!(LDAVarInferProblem(alpha, tlogp, doc), vinf_method.maxiter, vinf_method.tol)
+		info = iter_optim!(LDAVarInferProblem(alpha, tlogp, doc), tsol, vinf_method.maxiter, vinf_method.tol)
 
 		# collect relevant statistics
 		add!(slogθ, tsol.elogtheta)
 		add_word_counts!(W, doc.terms, doc.counts, tsol.phi)
-		objv += objective(tsol)
+		objv += info.objective
 	end
 	st.vinf_objv = objv
 end
 
 function update_alpha!(st::LDAVarLearnState)
-	slogθ = multiply!(st.slogθ, inv(s.tw))
+	slogθ = multiply!(st.slogθ, inv(st.tw))
 	Distributions.fit_mle!(Dirichlet, slogθ, st.alpha)
 end
 
 function update_topics!(st::LDAVarLearnState)
 	tlogp = st.tlogp
-	log!(normalize!(tlogp, W, 1, 2))
+	log!(normalize!(tlogp, st.W, 1, 2))
 end
 
-function learn{Corpus}(prb::LDAVarLearnProblem{Corpus}, init_model::LDAModel, method::LDAVarLearn)
-	if ntopics(prb) != ntopics(init_model)
-		throw(ArgumentError("The number of topics does not match."))
-	end
+function learn(corpus::AbstractVector{SDocument}, init_model::LDAModel, method::LDAVarLearn)
+	K = ntopics(init_model)
+	V = nterms(init_model)
+	prb = LDAVarLearnProblem(K, V, corpus)
 
-	st = initialize(prb, init_model)
+	st = initialize(prb, method, init_model)
 	info = iter_optim!(prb, st, method.maxiter, method.tol, method.display)
 	return (get_results(st), info)
 end

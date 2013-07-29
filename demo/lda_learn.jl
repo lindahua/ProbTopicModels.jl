@@ -1,5 +1,6 @@
 # Demo the learning of Latent Dirichlet Allocation (LDA)
 
+using NumericExtensions
 using ProbTopicModels
 
 ## ground-truth configuration
@@ -13,15 +14,12 @@ toc3 = [0.02, 0.05, 0.03, 0.5, 0.4]
 
 topics = hcat(toc1, toc2, toc3)
 model = LDAModel(alpha, topics)
-
-println("Underlying Model (dump): ")
-println("---------------------------")
-dump(model)
-println()
+K = ntopics(model)
+V = nterms(model)
 
 # generate data
 
-ndocs = 200
+ndocs = 20
 doclen = 1000
 println("Generating $(ndocs) documents (each of length $(doclen)) ...")
 
@@ -34,7 +32,20 @@ end
 
 # initialize model
 
+alpha_init = alpha
+topics_init = normalize(topics + 0.5, 1, 1)
+model_init = LDAModel(alpha_init, topics_init)
 
+results, info = learn(corpus, model_init, 
+	LDAVarLearn(tol=ndocs * 1.0e-3, display=:iter, fix_alpha=true))
 
+println("Underlying Model (dump): ")
+println("---------------------------")
+dump(model)
+println()
 
+println("Learned Model (dump):")
+println("---------------------------")
+dump(results.model)
+println()
 
