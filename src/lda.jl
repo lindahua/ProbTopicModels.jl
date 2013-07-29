@@ -30,7 +30,15 @@ function randdoc(model::LDAModel, theta::Vector{Float64}, len::Int)
 	SDocument(ts, wcounts[ts])
 end
 
-randdoc(model::LDAModel, len::Int) = randdoc(s, rand(s.tp_distr), len)
+randdoc(model::LDAModel, len::Int) = randdoc(model, rand(model.dird), len)
+
+# show model
+
+function show(io::IO, model::LDAModel)
+	K = ntopics(model)
+	V = nterms(model)
+	print(io, "LDAModel ($K topics, $V terms)")
+end
 
 
 #####################################################################
