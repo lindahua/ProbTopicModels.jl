@@ -19,7 +19,7 @@ V = nterms(model)
 
 # generate data
 
-ndocs = 20
+ndocs = 500
 doclen = 1000
 println("Generating $(ndocs) documents (each of length $(doclen)) ...")
 
@@ -32,12 +32,12 @@ end
 
 # initialize model
 
-alpha_init = alpha
-topics_init = normalize(topics + 0.5, 1, 1)
+alpha_init = [1.0, 1.0, 1.0]
+topics_init = normalize(topics + 0.2, 1, 1)
 model_init = LDAModel(alpha_init, topics_init)
 
 results, info = learn(corpus, model_init, 
-	LDAVarLearn(tol=ndocs * 1.0e-3, display=:iter, fix_alpha=true))
+	LDAVarLearn(tol=ndocs * 1.0e-3, maxiter=500, display=:iter))
 
 println("Underlying Model (dump): ")
 println("---------------------------")

@@ -305,6 +305,7 @@ end
 type LDAVarLearnState
 	tw::Float64                # total sample weight
 	alpha::Vector{Float64}     # Dirichlet cofficients of the model
+	lmnB::Float64              # log B(α)
 	tlogp::Matrix{Float64}     # log of word-probablities (K x V)
 	gammas::Matrix{Float64}    # a matrix of all gamma vectors
 
@@ -320,7 +321,7 @@ end
 
 ntopics(st::LDAVarLearnState) = length(st.alpha)
 
-objective(prb::LDAVarLearnProblem, st::LDAVarLearnState) = st.vinf_objv
+objective(prb::LDAVarLearnProblem, st::LDAVarLearnState) = st.vinf_objv - st.tw * st.lmnB
 
 immutable LDAVarLearnResults
 	model::LDAModel
@@ -357,9 +358,10 @@ function initialize(prb::LDAVarLearnProblem, method::LDAVarLearn, model::LDAMode
 
 	# initial model
 	alpha = model.dird.alpha
+	lmnB = model.dird.lmnB
 	tlogp = model.tlogp
 
-	LDAVarLearnState(float64(ndocs), alpha, tlogp, gammas, tsol, NaN, slogθ, W, 
+	LDAVarLearnState(float64(ndocs), alpha, lmnB, tlogp, gammas, tsol, NaN, slogθ, W, 
 		vinf_method, method.fix_alpha, method.fix_topics)
 end
 
@@ -443,6 +445,18 @@ end
 function update_alpha!(st::LDAVarLearnState)
 	slogθ = multiply!(st.slogθ, inv(st.tw))
 	Distributions.fit_mle!(Dirichlet, slogθ, st.alpha)
+
+	α = st.alpha
+	K = length(α)
+	lmnB = 0.
+	α0 = 0.
+	for k = 1:K
+		αk = α[k]
+		α0 += αk
+		lmnB += lgamma(αk)
+	end
+	lmnB -= lgamma(α0)
+	st.lmnB = lmnB
 end
 
 function update_topics!(st::LDAVarLearnState)
