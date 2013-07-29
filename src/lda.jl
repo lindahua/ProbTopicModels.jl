@@ -65,9 +65,20 @@ end
 # problem & solution types
 
 immutable LDAVarInferProblem <: IterOptimProblem
-	model::LDAModel
+	alpha::Vector{Float64}
+	tlogp::Matrix{Float64}	
 	doc::SDocument
+
+	function LDAVarInferProblem(α::Vector{Float64}, tlogp::Matrix{Float64}, doc::SDocument)
+		new(α, tlogp, doc)
+	end
+
+	function LDAVarInferProblem(model::LDAModel, doc::SDocument)
+		new(model.dird.alpha, model.tlogp, doc)
+	end
 end
+
+ntopics(prb::LDAVarInferProblem) = length(prb.alpha)
 
 immutable LDAVarInferSolution
 	gamma::Vector{Float64}
@@ -84,7 +95,7 @@ immutable LDAVarInferSolution
 end
 
 function check_compatible(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
-	K = ntopics(prb.model)
+	K = ntopics(prb)
 	n = histlength(prb.doc)
 	if !(length(sol.gamma) == K && size(sol.phi, 2) >= n)
 		throw(ArgumentError("The LDA problem and solution are not compatible."))
@@ -113,12 +124,10 @@ function objective(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 	# compute the objective of LDA variational inference
 
 	# problem fields
-	model::LDAModel = prb.model
+	K::Int = ntopics(prb)
+	α::Vector{Float64} = prb.alpha
+	tlogp::Matrix{Float64} = prb.tlogp
 	doc::SDocument = prb.doc
-
-	K::Int = ntopics(model)
-	α::Vector{Float64} = model.dird.alpha
-	tlogp::Matrix{Float64} = model.tlogp
 
 	n::Int = histlength(doc)
 	terms::Vector{Int} = doc.terms
@@ -171,13 +180,11 @@ end
 
 # update solution
 
-function update_per_gamma!(model::LDAModel, doc::SDocument, r::LDAVarInferSolution)
+function update_per_gamma!(tlogp::Matrix{Float64}, doc::SDocument, r::LDAVarInferSolution)
 	# update the result struct based on the gamma field
 
-	K::Int = ntopics(model)
-
 	# get model & doc fields
-	tlogp = model.tlogp
+	K = size(tlogp, 1)
 	terms = doc.terms
 	h = doc.counts
 	
@@ -203,18 +210,18 @@ function initialize!(prb::LDAVarInferProblem, r::LDAVarInferSolution)
 
 	check_compatible(prb, r)
 
-	model::LDAModel = prb.model
+	K::Int = ntopics(prb)
+	α::Vector{Float64} = prb.alpha
+	tlogp::Matrix{Float64} = prb.tlogp
 	doc::SDocument = prb.doc
-	K::Int = ntopics(model)
-	α::Vector{Float64} = model.dird.alpha
-
+	
 	avg_tocweight::Float64 = doc.sum_counts / K
 	γ = r.gamma
 	for k = 1:K
 		γ[k] = α[k] + avg_tocweight
 	end
 
-	update_per_gamma!(model, doc, r)
+	update_per_gamma!(tlogp, doc, r)
 end
 
 function update!(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
@@ -222,12 +229,11 @@ function update!(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 
 	check_compatible(prb, sol)
 
-	model::LDAModel = prb.model
+	K::Int = ntopics(prb)
 	doc::SDocument = prb.doc
-	K::Int = ntopics(model)
-
+	
 	# update γ
-	α::Vector{Float64} = model.dird.alpha
+	α::Vector{Float64} = prb.alpha
 	γ::Vector{Float64} = sol.gamma
 	τ::Vector{Float64} = sol.tocweights
 
@@ -236,13 +242,13 @@ function update!(prb::LDAVarInferProblem, sol::LDAVarInferSolution)
 	end
 
 	# update other fields
-	update_per_gamma!(model, doc, sol)
+	update_per_gamma!(prb.tlogp, doc, sol)
 end
 
 function initialize(prb::LDAVarInferProblem)
 	# Create an initialized variational inference result struct
 
-	initialize!(prb, LDAVarInferSolution(ntopics(prb.model), histlength(prb.doc)))
+	initialize!(prb, LDAVarInferSolution(ntopics(prb), histlength(prb.doc)))
 end
 
 function infer(model::LDAModel, doc::SDocument, method::LDAVarInfer)
@@ -297,7 +303,7 @@ type LDAVarLearnState
 	tsol::LDAVarInferSolution    # temporary solution for current document
 	vinf_objv::Float64           # accumulated objective of variational inference
 	slogθ::Vector{Float64}       # accumulated E[logθ] of variational inference
-	W::Marrix{Float64}           # accumulated per-topic word counts
+	W::Matrix{Float64}           # accumulated per-topic word counts
 
 	vinf_method::LDAVarInfer     # variational inference options
 	fix_alpha::Bool
